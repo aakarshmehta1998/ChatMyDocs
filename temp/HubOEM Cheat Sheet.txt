@@ -1,0 +1,65 @@
+==================================
+Rails Project Cheat Sheet
+==================================
+
+--- Admin Credentials ---
+Email:    jimmy+admin@jellytool.dev
+Password: JellyDev1
+
+
+--- Managing the Server ---
+
+To Start the Server:
+  bin/rails s
+
+To Stop the Server:
+  In the server's terminal window, press Ctrl-C.
+
+To Restart the Server:
+  Stop with Ctrl-C, then start again with bin/rails s.
+
+--- Dozzle Login ---
+
+URL: http://161.35.54.134:8080/login?redirectUrl=/
+Username: admin
+Password: XmQ779BGPL76
+
+
+
+--- Database Commands ---
+
+To run new migrations:
+  bin/rails db:migrate
+
+To undo the last migration:
+  bin/rails db:rollback
+
+To completely reset your local database (drops, creates, migrates, and seeds):
+  bin/rails db:reset
+
+
+--- Application & Workflow ---
+
+To open the Rails Console:
+  bin/rails console
+
+To see all application routes:
+  bin/rails routes
+
+To get the latest code from your team:
+  git pull
+
+To install new gems after pulling:
+  bundle install
+
+To view the server log in real-time (in a new terminal):
+  tail -f log/development.log
+
+
+--- Local Git Configuration (Your Machine Only) ---
+
+To ignore local changes to a tracked file (like database.yml):
+  git update-index --assume-unchanged config/database.yml
+
+To start tracking changes to that file again:
+  git update-index --no-assume-unchanged config/database.yml

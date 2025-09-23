@@ -1,0 +1,17 @@
+# env & OS
+.env
+*.DS_Store
+
+# caches / compiled
+__pycache__/
+*.pyc
+
+# app artifacts (vector DB, uploads, temp)
+data/
+db/
+temp/
+temp_docs/
+
+# streamlit local stuff
+.streamlit/cache/
+.streamlit/secrets.toml

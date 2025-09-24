@@ -9,16 +9,14 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import bcrypt
 
-from rag_core import process_and_store_documents, create_conversational_chain, load_vector_store
+from rag_core import process_and_store_documents, create_conversational_chain, load_vector_store, get_opensearch_client
 from style import CSS_CODE
 from auth import load_credentials_from_db, save_new_user_to_db
 import s3_utils
 
-# Page Configuration & Global CSS
 st.set_page_config(page_title="ChatMyDocs", page_icon="🤖", layout="wide")
 st.markdown(CSS_CODE, unsafe_allow_html=True)
 
-# Load Auth Config & Authenticator from DynamoDB
 credentials = load_credentials_from_db()
 authenticator = stauth.Authenticate(
     credentials,
@@ -27,11 +25,10 @@ authenticator = stauth.Authenticate(
     30
 )
 
+OPENSEARCH_INDEX_PREFIX = "cmdx-"
 
-# Helper Functions
 def sanitize_filename(name: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_-]', '_', name).lower()
-
 
 def get_kb_documents(username: str, kb_name: str) -> list:
     doc_list_path = os.path.join(f"data/{username}/{kb_name}", "source_documents.json")
@@ -40,13 +37,11 @@ def get_kb_documents(username: str, kb_name: str) -> list:
             return json.load(f)
     return []
 
-
 def save_chat_history(username: str, kb_name: str, messages: list):
     if not kb_name or not username: return
     history_path = os.path.join(f"data/{username}/{kb_name}", "chat_history.json")
     with open(history_path, 'w') as f:
         json.dump(messages, f)
-
 
 def load_chat_history(username: str, kb_name: str) -> list:
     history_path = os.path.join(f"data/{username}/{kb_name}", "chat_history.json")
@@ -55,8 +50,6 @@ def load_chat_history(username: str, kb_name: str) -> list:
             return json.load(f)
     return []
 
-
-# Wizard State Management
 def _init_wizard_state():
     st.session_state.setdefault("wizard_step", 1)
     st.session_state.setdefault("upload_buffer", [])
@@ -65,7 +58,6 @@ def _init_wizard_state():
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("current_kb_name", None)
     st.session_state.setdefault("current_kb_sanitized_name", None)
-
 
 def _reset_wizard(clear_chain=True):
     st.session_state.wizard_step = 1
@@ -77,8 +69,6 @@ def _reset_wizard(clear_chain=True):
         st.session_state.current_kb_name = None
         st.session_state.current_kb_sanitized_name = None
 
-
-# UI Rendering Functions
 def _sidebar_header(username: str, is_guest: bool):
     with st.sidebar:
         if is_guest:
@@ -105,7 +95,6 @@ def _sidebar_header(username: str, is_guest: bool):
                 _reset_wizard()
                 st.session_state.view = 'dashboard'
                 st.rerun()
-
 
 def step_upload(username: str):
     st.header("1. Upload Documents")
@@ -137,7 +126,6 @@ def step_upload(username: str):
 
     if not uploads and not st.session_state.upload_buffer:
         st.info("Select at least one file to continue.")
-
 
 def step_process(username: str):
     st.header("2. Process Documents")
@@ -187,8 +175,11 @@ def step_process(username: str):
                 json.dump(source_filenames, f)
 
             db_dir = os.path.join(base_dir, "db")
+            os.makedirs(db_dir, exist_ok=True)
             st.session_state.saved_file_paths = saved_paths
-            vector_store = process_and_store_documents(saved_paths, db_dir)
+
+            index_name = f"{OPENSEARCH_INDEX_PREFIX}{username}-{kb_name_sanitized}"
+            vector_store = process_and_store_documents(saved_paths, db_dir, index_name=index_name)
 
             st.session_state.rag_chain = create_conversational_chain(vector_store)
             st.session_state.messages = []
@@ -206,7 +197,6 @@ def step_process(username: str):
         if st.button("← Back", key="btn_process_back"):
             st.session_state.wizard_step = 1
             st.rerun()
-
 
 def step_chat(username: str, is_guest: bool):
     st.header("3. Chat")
@@ -245,14 +235,17 @@ def step_chat(username: str, is_guest: bool):
         else:
             with st.chat_message("assistant", avatar="🤖"):
                 with st.spinner("Thinking..."):
-                    response = st.session_state.rag_chain.invoke({"input": prompt})
-                    answer = response.get("answer", "")
+                    result = st.session_state.rag_chain.invoke({"query": prompt})
+                    answer = result.get("result", "")
                     st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                     if not is_guest:
-                        save_chat_history(username, st.session_state.current_kb_sanitized_name,
-                                          st.session_state.messages)
-
+                        save_chat_history(username, st.session_state.current_kb_sanitized_name, st.session_state.messages)
+                    srcs = result.get("source_documents", [])
+                    if srcs:
+                        with st.expander("Sources"):
+                            for d in srcs:
+                                st.write(f"• {d.metadata.get('source', 'document')}")
 
 def render_main_app(username: str, is_guest: bool = False):
     if 'wizard_step' not in st.session_state:
@@ -268,7 +261,6 @@ def render_main_app(username: str, is_guest: bool = False):
     else:
         step_chat(username, is_guest)
 
-
 def get_user_kbs(username: str) -> list:
     user_dir = f"data/{username}"
     if not os.path.exists(user_dir):
@@ -280,7 +272,6 @@ def get_user_kbs(username: str) -> list:
         if os.path.isdir(os.path.join(user_dir, kb_name, "db")):
             kbs.append(kb_name)
     return kbs
-
 
 def render_dashboard(username: str):
     st.title("Your Knowledge Bases")
@@ -308,7 +299,8 @@ def render_dashboard(username: str):
                 if st.button("Chat", key=f"chat_{kb_name}"):
                     with st.spinner(f"Loading '{display_name}'..."):
                         db_path = os.path.join(f"data/{username}/{kb_name}", "db")
-                        vector_store = load_vector_store(db_path)
+                        index_name = f"{OPENSEARCH_INDEX_PREFIX}{username}-{kb_name}"
+                        vector_store = load_vector_store(db_path, index_name=index_name)
                         if vector_store:
                             st.session_state.rag_chain = create_conversational_chain(vector_store)
                             st.session_state.messages = load_chat_history(username, kb_name)
@@ -325,10 +317,15 @@ def render_dashboard(username: str):
                     kb_dir = os.path.join(f"data/{username}", kb_name)
                     if os.path.exists(kb_dir):
                         shutil.rmtree(kb_dir)
-                        st.rerun()
+                    try:
+                        index_name = f"{OPENSEARCH_INDEX_PREFIX}{username}-{kb_name}"
+                        client = get_opensearch_client()
+                        if client.indices.exists(index=index_name):
+                            client.indices.delete(index=index_name, ignore=[400, 404])
+                    except Exception as e:
+                        st.warning(f"Could not delete OpenSearch index '{index_name}': {e}")
+                    st.rerun()
 
-
-# Application Router
 st.session_state.setdefault('active_user', None)
 is_guest = st.session_state.get('guest_mode', False)
 

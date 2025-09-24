@@ -1,94 +1,123 @@
-# rag_core.py
-
 import os
-import streamlit as st # <-- ADD IMPORT
-import boto3 # <-- ADD IMPORT
+import streamlit as st
+import boto3
+from requests_aws4auth import AWS4Auth
+from opensearchpy import OpenSearch, RequestsHttpConnection
 from langchain_community.chat_models import BedrockChat
 from langchain_community.embeddings import BedrockEmbeddings
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_community.document_loaders import UnstructuredFileLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import OpenSearchVectorSearch
+from langchain.chains import RetrievalQA
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import UnstructuredFileLoader
 from PIL import Image
 import pytesseract
-from langchain_core.documents import Document
 
-# --- NEW HELPER FUNCTION TO GET BEDROCK CLIENT ---
 def get_bedrock_client():
-    """Initializes and returns a boto3 Bedrock runtime client."""
     return boto3.client(
-        'bedrock-runtime',
+        "bedrock-runtime",
         aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
-        region_name=st.secrets["AWS_REGION"]
+        region_name=st.secrets["AWS_REGION"],
     )
 
-def process_and_store_documents(file_paths, db_path):
-    all_documents = []
-    image_extensions = ['.png', '.jpeg', '.jpg']
-    for file_path in file_paths:
-        file_extension = os.path.splitext(file_path)[1].lower()
+def _embeddings():
+    return BedrockEmbeddings(
+        client=get_bedrock_client(),
+        model_id="amazon.titan-embed-text-v1",
+    )
 
-        if file_extension in image_extensions:
+def get_opensearch_client():
+    region = st.secrets["AWS_REGION"]
+    host = st.secrets["OPENSEARCH_ENDPOINT"]
+
+    session = boto3.Session(
+        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+        region_name=region,
+    )
+    creds = session.get_credentials().get_frozen_credentials()
+    awsauth = AWS4Auth(
+        creds.access_key, creds.secret_key, region, "aoss", session_token=creds.token
+    )
+
+    return OpenSearch(
+        hosts=[{"host": host.replace("https://", "").replace("http://", ""), "port": 443}],
+        http_auth=awsauth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+    )
+
+def _ensure_index(index_name: str, dim: int):
+    client = get_opensearch_client()
+    if not client.indices.exists(index=index_name):
+        mapping = {
+            "settings": {"index": {"knn": True}},
+            "mappings": {
+                "properties": {
+                    "text": {"type": "text"},
+                    "source": {"type": "keyword"},
+                    "vector": {"type": "knn_vector", "dimension": dim},
+                }
+            },
+        }
+        client.indices.create(index=index_name, body=mapping)
+
+def _load_and_split(file_paths):
+    docs = []
+    img_ext = {".png", ".jpg", ".jpeg"}
+    for fp in file_paths:
+        ext = os.path.splitext(fp)[1].lower()
+        if ext in img_ext:
             try:
-                image = Image.open(file_path)
-                extracted_text = pytesseract.image_to_string(image)
-                metadata = {"source": os.path.basename(file_path)}
-                ocr_document = Document(page_content=extracted_text, metadata=metadata)
-                all_documents.append(ocr_document)
+                text = pytesseract.image_to_string(Image.open(fp))
+                docs.append(Document(page_content=text, metadata={"source": os.path.basename(fp)}))
             except Exception as e:
-                print(f"Error processing image {file_path} with OCR: {e}")
+                print(f"OCR error {fp}: {e}")
         else:
-            loader = UnstructuredFileLoader(file_path)
-            documents = loader.load()
-            all_documents.extend(documents)
+            docs.extend(UnstructuredFileLoader(fp).load())
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    docs = text_splitter.split_documents(all_documents)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    return splitter.split_documents(docs)
 
-    # --- UPDATED: Pass the client to the embeddings model ---
-    bedrock_client = get_bedrock_client()
-    embeddings = BedrockEmbeddings(
-        client=bedrock_client,
-        model_id="amazon.titan-embed-text-v1"
+def process_and_store_documents(file_paths, db_path, *, index_name: str):
+    docs = _load_and_split(file_paths)
+    em = _embeddings()
+    dim = len(em.embed_query("dimension probe"))
+    _ensure_index(index_name, dim)
+    vs = OpenSearchVectorSearch.from_documents(
+        documents=docs,
+        embedding=em,
+        client=get_opensearch_client(),
+        index_name=index_name,
+        vector_field="vector",
+        text_field="text",
     )
-    vector_store = Chroma.from_documents(docs, embeddings, persist_directory=db_path)
+    return vs
 
-    return vector_store
-
-
-def load_vector_store(db_path):
-    """Loads an existing ChromaDB vector store from a directory."""
-    if not os.path.exists(db_path):
-        return None
-    # --- UPDATED: Pass the client to the embeddings model ---
-    bedrock_client = get_bedrock_client()
-    embeddings = BedrockEmbeddings(
-        client=bedrock_client,
-        model_id="amazon.titan-embed-text-v1"
+def load_vector_store(db_path, *, index_name: str):
+    em = _embeddings()
+    _ensure_index(index_name, len(em.embed_query("dimension probe")))
+    return OpenSearchVectorSearch(
+        embedding_function=em,
+        client=get_opensearch_client(),
+        index_name=index_name,
+        vector_field="vector",
+        text_field="text",
     )
-    return Chroma(persist_directory=db_path, embedding_function=embeddings)
 
 def create_conversational_chain(vector_store):
-    # --- UPDATED: Pass the client to the chat model ---
-    bedrock_client = get_bedrock_client()
     llm = BedrockChat(
-        client=bedrock_client,
-        model_id="anthropic.claude-3-sonnet-20240229-v1:0"
+        client=get_bedrock_client(),
+        model_id="anthropic.claude-3-sonnet-20240229-v1:0",
     )
-    retriever = vector_store.as_retriever()
-
     system_prompt = (
         "You are a specialized assistant for answering questions based ONLY on the provided context from a user's documents. "
-        "Your role is to find and present information found within that text. "
-        "Under no circumstances should you use your own general knowledge. "
-        "If the answer to the question cannot be found in the provided context, you MUST respond with the exact phrase: "
+        "Under no circumstances should you use general knowledge. "
+        "If the answer cannot be found in the provided context, respond exactly with: "
         "'I'm sorry, but the answer to that question is not available in the provided documents.' "
-        "Do not add any other information or explanation. "
-        "If the answer is in the context, provide it directly based on the text."
-        "\n\n"
         "Context: {context}"
     )
     prompt = ChatPromptTemplate.from_messages(
@@ -97,6 +126,10 @@ def create_conversational_chain(vector_store):
             ("human", "{input}"),
         ]
     )
-    question_answer_chain = create_stuff_documents_chain(llm, prompt)
-    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-    return rag_chain
+    qa = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=vector_store.as_retriever(),
+        return_source_documents=True,
+        chain_type="stuff",
+    )
+    return qa

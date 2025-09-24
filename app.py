@@ -1,3 +1,4 @@
+# app.py
 
 import os
 import re
@@ -10,30 +11,37 @@ import bcrypt
 
 from rag_core import process_and_store_documents, create_conversational_chain, load_vector_store
 from style import CSS_CODE
-from auth import load_config, save_config
+from auth import load_credentials_from_db, save_new_user_to_db
 import s3_utils
 
 # Page Configuration & Global CSS
 st.set_page_config(page_title="ChatMyDocs", page_icon="🤖", layout="wide")
 st.markdown(CSS_CODE, unsafe_allow_html=True)
 
-# Load Auth Config & Authenticator
-config = load_config()
+# Load Auth Config & Authenticator from DynamoDB
+credentials = load_credentials_from_db()
 authenticator = stauth.Authenticate(
-    config['credentials'],
-    config['cookie']['name'],
-    config['cookie']['key'],
-    config['cookie']['expiry_days']
+    credentials,
+    "chatmydocs_cookie",
+    "abcdef",
+    30
 )
+
 
 # Helper Functions
 def sanitize_filename(name: str) -> str:
-    """Converts a string to a safe, usable directory name."""
     return re.sub(r'[^a-zA-Z0-9_-]', '_', name).lower()
 
 
+def get_kb_documents(username: str, kb_name: str) -> list:
+    doc_list_path = os.path.join(f"data/{username}/{kb_name}", "source_documents.json")
+    if os.path.exists(doc_list_path):
+        with open(doc_list_path, 'r') as f:
+            return json.load(f)
+    return []
+
+
 def save_chat_history(username: str, kb_name: str, messages: list):
-    """Saves the chat history to a JSON file."""
     if not kb_name or not username: return
     history_path = os.path.join(f"data/{username}/{kb_name}", "chat_history.json")
     with open(history_path, 'w') as f:
@@ -41,20 +49,12 @@ def save_chat_history(username: str, kb_name: str, messages: list):
 
 
 def load_chat_history(username: str, kb_name: str) -> list:
-    """Loads the chat history from a JSON file."""
     history_path = os.path.join(f"data/{username}/{kb_name}", "chat_history.json")
     if os.path.exists(history_path):
         with open(history_path, 'r') as f:
             return json.load(f)
     return []
 
-def get_kb_documents(username: str, kb_name: str) -> list:
-    """Reads the list of source documents for a given KB."""
-    doc_list_path = os.path.join(f"data/{username}/{kb_name}", "source_documents.json")
-    if os.path.exists(doc_list_path):
-        with open(doc_list_path, 'r') as f:
-            return json.load(f)
-    return []
 
 # Wizard State Management
 def _init_wizard_state():
@@ -66,6 +66,7 @@ def _init_wizard_state():
     st.session_state.setdefault("current_kb_name", None)
     st.session_state.setdefault("current_kb_sanitized_name", None)
 
+
 def _reset_wizard(clear_chain=True):
     st.session_state.wizard_step = 1
     st.session_state.upload_buffer = []
@@ -75,6 +76,7 @@ def _reset_wizard(clear_chain=True):
         st.session_state.messages = []
         st.session_state.current_kb_name = None
         st.session_state.current_kb_sanitized_name = None
+
 
 # UI Rendering Functions
 def _sidebar_header(username: str, is_guest: bool):
@@ -167,7 +169,6 @@ def step_process(username: str):
             base_dir = f"data/{username}/{kb_name_sanitized}"
             os.makedirs(base_dir, exist_ok=True)
 
-            # Upload to S3 and save locally for processing
             s3_bucket = st.secrets["S3_BUCKET_NAME"]
             saved_paths = []
             source_filenames = [item['name'] for item in st.session_state.upload_buffer]
@@ -182,16 +183,13 @@ def step_process(username: str):
                     f.write(item["data"])
                 saved_paths.append(local_path)
 
-            # Save metadata about source documents
             with open(os.path.join(base_dir, 'source_documents.json'), 'w') as f:
                 json.dump(source_filenames, f)
 
-            # Process documents and create vector store
             db_dir = os.path.join(base_dir, "db")
             st.session_state.saved_file_paths = saved_paths
             vector_store = process_and_store_documents(saved_paths, db_dir)
 
-            # Update session state for chat
             st.session_state.rag_chain = create_conversational_chain(vector_store)
             st.session_state.messages = []
             st.session_state.current_kb_name = kb_name
@@ -272,7 +270,6 @@ def render_main_app(username: str, is_guest: bool = False):
 
 
 def get_user_kbs(username: str) -> list:
-    """Lists all knowledge bases for a given user."""
     user_dir = f"data/{username}"
     if not os.path.exists(user_dir):
         os.makedirs(user_dir)
@@ -283,6 +280,7 @@ def get_user_kbs(username: str) -> list:
         if os.path.isdir(os.path.join(user_dir, kb_name, "db")):
             kbs.append(kb_name)
     return kbs
+
 
 def render_dashboard(username: str):
     st.title("Your Knowledge Bases")
@@ -329,7 +327,9 @@ def render_dashboard(username: str):
                         shutil.rmtree(kb_dir)
                         st.rerun()
 
+
 # Application Router
+st.session_state.setdefault('active_user', None)
 is_guest = st.session_state.get('guest_mode', False)
 
 if is_guest:
@@ -337,6 +337,12 @@ if is_guest:
 
 elif st.session_state.get("authentication_status"):
     username = st.session_state.get("username")
+
+    if st.session_state.active_user != username:
+        _reset_wizard(clear_chain=True)
+        st.session_state.view = 'dashboard'
+        st.session_state.active_user = username
+
     st.session_state.setdefault('view', 'dashboard')
 
     if st.session_state.view == 'dashboard':
@@ -349,6 +355,7 @@ else:
     if 'page' not in st.session_state:
         st.session_state.page = 'login'
 
+    st.session_state.active_user = None
     _, center, _ = st.columns([1, 1.2, 1])
     with center:
         st.markdown('<div id="login-card" class="login-card">', unsafe_allow_html=True)
@@ -388,20 +395,15 @@ else:
                     st.error("Please fill all fields.")
                 elif pw != pw2:
                     st.error("Passwords do not match.")
-                elif username in config.get("credentials", {}).get("usernames", {}):
+                elif username in credentials.get("usernames", {}):
                     st.error("That username is already taken.")
                 else:
                     hashed_pw = bcrypt.hashpw(pw.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                    config.setdefault("credentials", {}).setdefault("usernames", {})
-                    config["credentials"]["usernames"][username] = {
-                        "email": email,
-                        "name": full_name,
-                        "password": hashed_pw,
-                    }
-                    save_config(config)
-                    st.success("User registered successfully! Please log in.")
-                    st.session_state.page = 'login'
-                    st.rerun()
+                    success = save_new_user_to_db(username, full_name, email, hashed_pw)
+                    if success:
+                        st.success("User registered successfully! Please log in.")
+                        st.session_state.page = 'login'
+                        st.rerun()
 
             b1, b2, b3 = st.columns([1, 1, 1])
             with b2:

@@ -1,6 +1,8 @@
 # rag_core.py
 
 import os
+import streamlit as st # <-- ADD IMPORT
+import boto3 # <-- ADD IMPORT
 from langchain_community.chat_models import BedrockChat
 from langchain_community.embeddings import BedrockEmbeddings
 from langchain.chains import create_retrieval_chain
@@ -13,6 +15,16 @@ from PIL import Image
 import pytesseract
 from langchain_core.documents import Document
 
+# --- NEW HELPER FUNCTION TO GET BEDROCK CLIENT ---
+def get_bedrock_client():
+    """Initializes and returns a boto3 Bedrock runtime client."""
+    return boto3.client(
+        'bedrock-runtime',
+        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+        region_name=st.secrets["AWS_REGION"]
+    )
+
 def process_and_store_documents(file_paths, db_path):
     all_documents = []
     image_extensions = ['.png', '.jpeg', '.jpg']
@@ -21,19 +33,14 @@ def process_and_store_documents(file_paths, db_path):
 
         if file_extension in image_extensions:
             try:
-                # Process image with OCR
                 image = Image.open(file_path)
                 extracted_text = pytesseract.image_to_string(image)
-
-                # Create a LangChain Document object from the extracted text
                 metadata = {"source": os.path.basename(file_path)}
                 ocr_document = Document(page_content=extracted_text, metadata=metadata)
                 all_documents.append(ocr_document)
-
             except Exception as e:
                 print(f"Error processing image {file_path} with OCR: {e}")
         else:
-            # Process other file types as before
             loader = UnstructuredFileLoader(file_path)
             documents = loader.load()
             all_documents.extend(documents)
@@ -41,7 +48,12 @@ def process_and_store_documents(file_paths, db_path):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs = text_splitter.split_documents(all_documents)
 
-    embeddings = BedrockEmbeddings(model_id="amazon.titan-embed-text-v1")
+    # --- UPDATED: Pass the client to the embeddings model ---
+    bedrock_client = get_bedrock_client()
+    embeddings = BedrockEmbeddings(
+        client=bedrock_client,
+        model_id="amazon.titan-embed-text-v1"
+    )
     vector_store = Chroma.from_documents(docs, embeddings, persist_directory=db_path)
 
     return vector_store
@@ -51,11 +63,21 @@ def load_vector_store(db_path):
     """Loads an existing ChromaDB vector store from a directory."""
     if not os.path.exists(db_path):
         return None
-    embeddings = BedrockEmbeddings(model_id="amazon.titan-embed-text-v1")
+    # --- UPDATED: Pass the client to the embeddings model ---
+    bedrock_client = get_bedrock_client()
+    embeddings = BedrockEmbeddings(
+        client=bedrock_client,
+        model_id="amazon.titan-embed-text-v1"
+    )
     return Chroma(persist_directory=db_path, embedding_function=embeddings)
 
 def create_conversational_chain(vector_store):
-    llm = BedrockChat(model_id="anthropic.claude-3-sonnet-20240229-v1:0")
+    # --- UPDATED: Pass the client to the chat model ---
+    bedrock_client = get_bedrock_client()
+    llm = BedrockChat(
+        client=bedrock_client,
+        model_id="anthropic.claude-3-sonnet-20240229-v1:0"
+    )
     retriever = vector_store.as_retriever()
 
     system_prompt = (

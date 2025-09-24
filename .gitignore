@@ -1,17 +1,20 @@
-# env & OS
+# IDE-specific files
+.idea/
+
+# Python virtual environment
+.venv/
+
+# Environment variables and OS files
 .env
 *.DS_Store
 
-# caches / compiled
+# Python cache and compiled files
 __pycache__/
 *.pyc
 
-# app artifacts (vector DB, uploads, temp)
-data/
-db/
-temp/
-temp_docs/
-
-# streamlit local stuff
-.streamlit/cache/
+# Sensitive configuration files
+config.yaml
 .streamlit/secrets.toml
+
+# Application data (user KBs, uploads, etc.)
+data/

@@ -2,22 +2,6 @@
 
 CSS_CODE = """
 <style>
-/*
- * ChatMyDocs Custom Stylesheet
- * -----------------------------
- * This stylesheet defines the custom visual appearance for the application,
- * overriding default Streamlit styles to create a unique, branded look.
- *
- * Sections:
- * 1. Root Variables & Theme Palette
- * 2. Global Styles & App Background
- * 3. Layout Components (Sidebar, Cards)
- * 4. Core UI Elements (Typography, Inputs, Buttons)
- * 5. Application-Specific Components (Chat, Uploader)
- * 6. Utilities & Overrides
- */
-
-
 /* 1. Root Variables & Theme Palette
 -------------------------------------------------- */
 :root {
@@ -91,7 +75,6 @@ section[data-testid="stSidebar"] {
 
 /* 4. Core UI Elements
 -------------------------------------------------- */
-/* Typography */
 h1, h2, h3 { color: var(--text); letter-spacing: .3px; }
 h1 { font-size: 2.2rem !important; font-weight: 850; }
 h2 { font-size: 1.55rem !important; font-weight: 750; }
@@ -103,7 +86,6 @@ p, label, span, div { color: var(--text); }
   color: transparent; text-align: left; margin-bottom: 18px;
 }
 
-/* Inputs */
 input, textarea, .stTextInput input, .stTextArea textarea {
   background: rgba(255, 255, 255, 0.07) !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
@@ -114,7 +96,6 @@ input, textarea, .stTextInput input, .stTextArea textarea {
   box-shadow: 0 0 0 2px rgba(106, 169, 255, 0.45);
 }
 
-/* Buttons */
 .cta-wrap, .cta-wrap-small { text-align: center; }
 .cta-wrap .stButton > button, .login-card [data-testid="stFormSubmitter"] button {
   background: linear-gradient(90deg, var(--primary), var(--primary-2));
@@ -170,7 +151,6 @@ button:has(span:contains("Create Knowledge Base")):hover {
 
 /* 5. Application-Specific Components
 -------------------------------------------------- */
-/* File Uploader */
 [data-testid="stFileUploader"] {
   background: rgba(255, 255, 255, 0.05);
   border: 1px dashed rgba(255, 255, 255, 0.18);
@@ -182,7 +162,6 @@ button:has(span:contains("Create Knowledge Base")):hover {
   box-shadow: 0 0 0 2px rgba(106, 169, 255, 0.22) inset;
 }
 
-/* Chat Interface */
 [data-testid="stChatMessage"]:has([data-testid="stAvatarIcon-assistant"]) {
   background: rgba(106, 169, 255, 0.10);
   border-left: 4px solid #7FB8FF;
@@ -203,14 +182,12 @@ button:has(span:contains("Create Knowledge Base")):hover {
 
 /* 6. Utilities & Overrides
 -------------------------------------------------- */
-/* Dividers */
 hr, .stDivider {
   border: none;
   height: 1px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0));
 }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb {
   background: linear-gradient(180deg, rgba(106, 169, 255, .45), rgba(79, 107, 255, .45));
@@ -218,25 +195,21 @@ hr, .stDivider {
 }
 ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.06); }
 
-/* Center form submission buttons (Login, Create Account) */
 .login-card [data-testid="stForm"] [data-testid="stElementContainer"]:has([data-testid="stFormSubmitButton"]) {
   margin-left: auto;
   margin-right: auto;
 }
 
-/* Hide default Streamlit helper text on inputs */
 [data-testid="stTextInput"] > *:not(label):not([data-testid="stTextInputRootElement"]),
 [data-testid="stTextArea"] > *:not(label):not([data-testid="stTextAreaRootElement"]) {
   display: none !important;
 }
 
-/* Remove focus outline from password field's eye icon */
 .stTextInput:has(input[type="password"]) button:focus-visible {
   outline: none !important;
   box-shadow: none !important;
 }
 
-/* Guard against stray elements appearing on the login page */
 *:has(> #login-card) > :not(#login-card) { display: none !important; }
 #login-card.login-card {
   background: transparent !important;

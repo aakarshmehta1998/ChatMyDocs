@@ -1,20 +1,21 @@
 import os
 import streamlit as st
 import boto3
-from requests_aws4auth import AWS4Auth
-from opensearchpy import OpenSearch, RequestsHttpConnection
+import tempfile
 from langchain_community.chat_models import BedrockChat
 from langchain_community.embeddings import BedrockEmbeddings
-from langchain_community.vectorstores import OpenSearchVectorSearch
+from langchain_pinecone import PineconeVectorStore
 from langchain.chains import RetrievalQA
 from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import UnstructuredFileLoader
 from PIL import Image
 import pytesseract
+from pinecone import Pinecone
+from langchain.prompts import PromptTemplate
 
 def get_bedrock_client():
+    """Initializes and returns a boto3 client for Bedrock Runtime."""
     return boto3.client(
         "bedrock-runtime",
         aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
@@ -23,113 +24,124 @@ def get_bedrock_client():
     )
 
 def _embeddings():
+    """Creates and returns BedrockEmbeddings using the Titan model."""
     return BedrockEmbeddings(
         client=get_bedrock_client(),
         model_id="amazon.titan-embed-text-v1",
     )
 
-def get_opensearch_client():
-    region = st.secrets["AWS_REGION"]
-    host = st.secrets["OPENSEARCH_ENDPOINT"]
-
-    session = boto3.Session(
-        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
-        region_name=region,
-    )
-    creds = session.get_credentials().get_frozen_credentials()
-    awsauth = AWS4Auth(
-        creds.access_key, creds.secret_key, region, "aoss", session_token=creds.token
-    )
-
-    return OpenSearch(
-        hosts=[{"host": host.replace("https://", "").replace("http://", ""), "port": 443}],
-        http_auth=awsauth,
-        use_ssl=True,
-        verify_certs=True,
-        connection_class=RequestsHttpConnection,
-    )
-
-def _ensure_index(index_name: str, dim: int):
-    client = get_opensearch_client()
-    if not client.indices.exists(index=index_name):
-        mapping = {
-            "settings": {"index": {"knn": True}},
-            "mappings": {
-                "properties": {
-                    "text": {"type": "text"},
-                    "source": {"type": "keyword"},
-                    "vector": {"type": "knn_vector", "dimension": dim},
-                }
-            },
-        }
-        client.indices.create(index=index_name, body=mapping)
-
-def _load_and_split(file_paths):
+def _load_and_split(in_memory_files):
+    """
+    Loads documents from in-memory data, saves them to a temporary directory
+    for processing, and then splits them into chunks.
+    """
     docs = []
     img_ext = {".png", ".jpg", ".jpeg"}
-    for fp in file_paths:
-        ext = os.path.splitext(fp)[1].lower()
-        if ext in img_ext:
-            try:
-                text = pytesseract.image_to_string(Image.open(fp))
-                docs.append(Document(page_content=text, metadata={"source": os.path.basename(fp)}))
-            except Exception as e:
-                print(f"OCR error {fp}: {e}")
-        else:
-            docs.extend(UnstructuredFileLoader(fp).load())
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for file_data in in_memory_files:
+            file_name = file_data["name"]
+            file_bytes = file_data["data"]
+
+            temp_path = os.path.join(temp_dir, file_name)
+
+            with open(temp_path, "wb") as f:
+                f.write(file_bytes)
+
+            ext = os.path.splitext(temp_path)[1].lower()
+            if ext in img_ext:
+                try:
+                    text = pytesseract.image_to_string(Image.open(temp_path))
+                    docs.append(Document(page_content=text, metadata={"source": file_name}))
+                except Exception as e:
+                    st.error(f"OCR error on {file_name}: {e}")
+            else:
+                try:
+                    loader = UnstructuredFileLoader(temp_path)
+                    loaded_docs = loader.load()
+                    for doc in loaded_docs:
+                        doc.metadata["source"] = file_name
+                    docs.extend(loaded_docs)
+                except Exception as e:
+                    st.error(f"Failed to load {file_name}: {e}")
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     return splitter.split_documents(docs)
 
-def process_and_store_documents(file_paths, db_path, *, index_name: str):
-    docs = _load_and_split(file_paths)
-    em = _embeddings()
-    dim = len(em.embed_query("dimension probe"))
-    _ensure_index(index_name, dim)
-    vs = OpenSearchVectorSearch.from_documents(
-        documents=docs,
-        embedding=em,
-        client=get_opensearch_client(),
-        index_name=index_name,
-        vector_field="vector",
-        text_field="text",
-    )
-    return vs
+def process_and_store_documents(in_memory_files, namespace: str):
+    """Processes in-memory documents and stores their embeddings in Pinecone."""
+    with st.spinner("Extracting text and creating embeddings..."):
+        docs = _load_and_split(in_memory_files)
+        em = _embeddings()
+        index_name = st.secrets["PINECONE_INDEX_NAME"]
 
-def load_vector_store(db_path, *, index_name: str):
+    with st.spinner(f"Storing {len(docs)} document chunks in the knowledge base..."):
+        PineconeVectorStore.from_documents(
+            documents=docs,
+            embedding=em,
+            index_name=index_name,
+            namespace=namespace
+        )
+
+    return load_vector_store(namespace=namespace)
+
+def load_vector_store(namespace: str):
+    """Loads an existing vector store from Pinecone by namespace."""
     em = _embeddings()
-    _ensure_index(index_name, len(em.embed_query("dimension probe")))
-    return OpenSearchVectorSearch(
-        embedding_function=em,
-        client=get_opensearch_client(),
+    index_name = st.secrets["PINECONE_INDEX_NAME"]
+
+    return PineconeVectorStore.from_existing_index(
+        embedding=em,
         index_name=index_name,
-        vector_field="vector",
-        text_field="text",
+        namespace=namespace
     )
+
+def delete_knowledge_base(namespace: str):
+    """Deletes all vectors from a specific namespace in the Pinecone index."""
+    try:
+        pc = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
+        index = pc.Index(st.secrets["PINECONE_INDEX_NAME"])
+        index.delete(namespace=namespace, delete_all=True)
+        return True
+    except Exception as e:
+        st.error(f"Error deleting knowledge base from Pinecone: {e}")
+        return False
 
 def create_conversational_chain(vector_store):
+    """Creates the LangChain conversational retrieval chain with a custom prompt."""
     llm = BedrockChat(
         client=get_bedrock_client(),
         model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+        model_kwargs={"temperature": 0.1}
     )
-    system_prompt = (
-        "You are a specialized assistant for answering questions based ONLY on the provided context from a user's documents. "
-        "Under no circumstances should you use general knowledge. "
-        "If the answer cannot be found in the provided context, respond exactly with: "
-        "'I'm sorry, but the answer to that question is not available in the provided documents.' "
-        "Context: {context}"
+    prompt_template = """
+    You are a friendly and helpful assistant for answering questions based on the provided text.
+
+    Use the following context to answer the user's question.
+
+    - If the user asks a question that can be answered from the context, provide a clear and direct answer based ONLY on that context.
+    - If the answer is not available in the context, politely state that the document does not contain that information. Do not use your external knowledge.
+    - For simple greetings or conversational phrases (like "hello", "thank you"), respond naturally and politely.
+    
+    Context: {context}
+    Question: {question}
+
+    Helpful Answer:"""
+
+    PROMPT = PromptTemplate(
+        template=prompt_template, input_variables=["context", "question"]
     )
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", "{input}"),
-        ]
+
+    retriever = vector_store.as_retriever(
+        search_type="mmr",
+        search_kwargs={'k': 5, 'fetch_k': 50}
     )
+
     qa = RetrievalQA.from_chain_type(
         llm=llm,
-        retriever=vector_store.as_retriever(),
+        retriever=retriever,
         return_source_documents=True,
         chain_type="stuff",
+        chain_type_kwargs={"prompt": PROMPT}
     )
     return qa

@@ -80,7 +80,8 @@ def process_and_store_documents(in_memory_files, namespace: str):
             documents=docs,
             embedding=em,
             index_name=index_name,
-            namespace=namespace
+            namespace=namespace,
+            batch_size=64  # OPTIMIZATION: Process documents in larger batches
         )
 
     return load_vector_store(namespace=namespace)
@@ -122,7 +123,7 @@ def create_conversational_chain(vector_store):
     - If the user asks a question that can be answered from the context, provide a clear and direct answer based ONLY on that context.
     - If the answer is not available in the context, politely state that the document does not contain that information. Do not use your external knowledge.
     - For simple greetings or conversational phrases (like "hello", "thank you"), respond naturally and politely.
-    
+
     Context: {context}
     Question: {question}
 
